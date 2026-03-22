@@ -1,0 +1,108 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: threats
+    // Document ID: auto-generated or threatId
+    // Fields:
+    //   - id: string (required)
+    //   - source: string (required)
+    //   - type: string (required)
+    //   - category: string (required, enum)
+    //   - risk: string (required, enum)
+    //   - timestamp: string (required)
+    //   - status: string (required, enum)
+    //   - aiAnalysis: map (optional)
+    //   - createdBy: string (optional, UID)
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - role: string (optional, enum)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "mustealawal@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidThreat(data) {
+      return hasRequiredFields(['id', 'source', 'type', 'category', 'risk', 'timestamp', 'status']) &&
+             data.category in ['Phishing', 'Malware', 'Spoofing', 'Social', 'Other'] &&
+             data.risk in ['Critical', 'High', 'Medium', 'Low'] &&
+             data.status in ['active', 'reviewed'] &&
+             data.source is string && data.source.size() < 256 &&
+             data.type is string && data.type.size() < 256;
+    }
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'email']) &&
+             isValidEmail(data.email) &&
+             data.uid == request.auth.uid &&
+             (!('role' in data) || data.role in ['admin', 'analyst']);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && 
+                      (!('role' in request.resource.data) || request.resource.data.role == 'analyst' || isAdmin());
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
+                      (request.resource.data.role == resource.data.role || isAdmin());
+    }
+
+    match /threats/{threatId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidThreat(request.resource.data);
+      allow update: if isAuthenticated() && isValidThreat(request.resource.data) && 
+                      (isAdmin() || (resource.data.createdBy == request.auth.uid) || 
+                       (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])));
+      allow delete: if isAdmin();
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
